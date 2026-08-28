@@ -835,6 +835,8 @@ class Speakerid(Baseplugin):
         if self.committed_speaker is not None:
             return
 
+        self.logger.debug(f"Handling detection for chunk_id={chunk_id}: match={match}, score={score}")
+
         # Nothing usable above the low bar → tentative "unknown", no name injected.
         if not match or score < self.confidence_threshold_low:
             self._send_tentative(None, score, chunk_id)
@@ -871,7 +873,10 @@ class Speakerid(Baseplugin):
         active — during the inter-conversation gap the same injection is a continuous
         PRE-WARM: it keeps the prompt ready but stays unlocked so the ambient speaker
         can be revised. A conversation-scoped commit (or a manual set_speaker) is what
-        actually locks."""
+        actually locks.
+
+        chunk_id: optional traceability token (from the frontend audio chunk) forwarded
+        into the log line so this commit can be correlated with the originating chunk."""
         status = "confirmed" if self.conversation_active else "prewarmed"
         if self.conversation_active:
             self.committed_speaker = name          # LOCK — conversations only
@@ -891,7 +896,10 @@ class Speakerid(Baseplugin):
 
     def _send_tentative(self, name, score, chunk_id: Optional[str] = None):
         """Show a tentative (unconfirmed) candidate in the topbar WITHOUT injecting a
-        name into the LLM context. name=None ⇒ unknown/listening."""
+        name into the LLM context. name=None ⇒ unknown/listening.
+
+        chunk_id: optional traceability token (from the frontend audio chunk) forwarded
+        into the frontend message so it can be correlated with the originating chunk."""
         self.last_speaker.id = name
         self.last_speaker.confidence = score
         self.send_message_to_frontend({
