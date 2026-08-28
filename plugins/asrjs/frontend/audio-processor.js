@@ -10,6 +10,7 @@ class AudioProcessor extends AudioWorkletProcessor {
         this.targetSampleRate = 16000;
         this.chunkDuration = 3.0;
         this.wakewordChunkDuration = 0.08;  // 80ms chunks for wakeword detection
+        this.speakerIdChunkCounter = 0;  // Unique, incrementing ID for each speakerid chunk (traceability)
 
         // Handle messages from main thread
         this.isRecording = false;
@@ -96,11 +97,13 @@ class AudioProcessor extends AudioWorkletProcessor {
             if (this.speakerIdBuffer.length >= chunkSize) {
                 const chunk = this.speakerIdBuffer.slice(0, chunkSize);
                 this.speakerIdBuffer = this.speakerIdBuffer.slice(chunkSize); // Remove used portion
+                this.speakerIdChunkCounter++;
 
                 // Send chunk to main thread
                 this.port.postMessage({
                     type: 'speakerid-chunk',
-                    data: chunk
+                    data: chunk,
+                    chunk_id: this.speakerIdChunkCounter
                 });
             }
         }

@@ -417,15 +417,15 @@ class Speakerid(Baseplugin):
             self.audio_buffer = deque(maxlen=32000)
 
     @hookimpl
-    def process_audio_chunk(self, audio_data: bytes, sample_rate: int = 48000):
+    def process_audio_chunk(self, audio_data: bytes, sample_rate: int = 48000, chunk_id: Optional[str] = None):
         """Process incoming audio chunks for real-time speaker identification"""
         # Privacy gate: when voice profiles are disabled, accept no mic audio.
         if not self.voice_profiles_enabled:
-            return {"status": "disabled", "message": "Voice profiles are disabled"}
+            return {"status": "disabled", "message": "Voice profiles are disabled", "chunk_id": chunk_id}
         # TTS is speaking: the mic captures the app's own synthesized voice, which can't
         # match an enrolled speaker — skip identification (and don't touch the buffer).
         if self.identification_paused:
-            return {"status": "paused", "message": "Identification paused during TTS"}
+            return {"status": "paused", "message": "Identification paused during TTS", "chunk_id": chunk_id}
         # Update sample rate if different from current
         if sample_rate != self.sample_rate:
             self.sample_rate = sample_rate
@@ -437,14 +437,16 @@ class Speakerid(Baseplugin):
         if self.speaker_system is None or not self.speaker_system_ready:
             if not self.initialization_complete:
                 # Still initializing
-                return {"status": "initializing", "message": "SpeakerID system still initializing"}
+                return {"status": "initializing", "message": "SpeakerID system still initializing", "chunk_id": chunk_id}
             else:
                 # Initialization completed but failed
-                return {"status": "error", "message": "SpeakerID system failed to initialize"}
+                return {"status": "error", "message": "SpeakerID system failed to initialize", "chunk_id": chunk_id}
         
         # Skip chunks too small to identify.
         if len(audio_data) < 100:
-            return {"status": "small_chunk", "message": "Audio chunk too small to process"}
+            return {"status": "small_chunk", "message": "Audio chunk too small to process", "chunk_id": chunk_id}
+        
+        self.logger.debug(f"Processing speakerid audio chunk_id={chunk_id} ({len(audio_data)} bytes)")
         
         # Convert bytes to numpy array (16-bit PCM)
         audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
@@ -469,12 +471,12 @@ class Speakerid(Baseplugin):
                 buffer_duration >= self.min_audio_duration and
                 current_time - self.last_identification_time >= self.identification_cooldown):
                 
-                self._process_buffer_for_identification(sample_rate)
-                return {"status": "processed", "message": "Audio chunk processed successfully"}
+                self._process_buffer_for_identification(sample_rate, chunk_id)
+                return {"status": "processed", "message": "Audio chunk processed successfully", "chunk_id": chunk_id}
             
-            return {"status": "buffering", "message": f"Buffering audio ({buffer_duration:.1f}s)", "buffer_duration": buffer_duration}
+            return {"status": "buffering", "message": f"Buffering audio ({buffer_duration:.1f}s)", "buffer_duration": buffer_duration, "chunk_id": chunk_id}
     
-    def _process_buffer_for_identification(self, sample_rate: int):
+    def _process_buffer_for_identification(self, sample_rate: int, chunk_id: Optional[str] = None):
         """Process the current audio buffer for speaker identification"""
         try:
             # LOCKED: a speaker is committed for this conversation — skip the
@@ -494,9 +496,10 @@ class Speakerid(Baseplugin):
             )
 
             self.last_identification_time = time.time()
-            self._handle_detection(match, confidence, top_results)
+            self.logger.debug(f"Identification for chunk_id={chunk_id}: match={match}, confidence={confidence:.2f}")
+            self._handle_detection(match, confidence, top_results, chunk_id)
         except Exception as e:
-            self.logger.error(f"Error during speaker identification: {e}")
+            self.logger.error(f"Error during speaker identification (chunk_id={chunk_id}): {e}")
     
 
     
@@ -755,7 +758,7 @@ class Speakerid(Baseplugin):
             return rows
 
         @self.router.post("/process_audio_chunk")
-        async def process_audio_chunk_endpoint(audio_file: UploadFile = File(...), sample_rate: Optional[int] = None):
+        async def process_audio_chunk_endpoint(audio_file: UploadFile = File(...), sample_rate: Optional[int] = None, chunk_id: Optional[str] = None):
             """Receive audio chunk for real-time speaker identification"""
             # Privacy gate: accept no mic audio (and write no debug chunk) when disabled.
             if not self.voice_profiles_enabled:
@@ -766,6 +769,8 @@ class Speakerid(Baseplugin):
                 
                 # Use provided sample rate or default to 48kHz (actual browser rate)
                 effective_sample_rate = sample_rate if sample_rate is not None else 48000
+                
+                self.logger.debug(f"Received audio chunk_id={chunk_id} ({len(audio_bytes)} bytes, sample_rate={effective_sample_rate})")
                 
                 # Convert WebM to PCM if needed
                 if audio_file.content_type and 'webm' in audio_file.content_type:
@@ -785,31 +790,33 @@ class Speakerid(Baseplugin):
                     pcm_data = await self._convert_webm_to_pcm_ffmpeg(None, effective_sample_rate, webm_file_path)
                     if pcm_data is not None:
                         # Process chunk using the existing hook method logic
-                        result = self.process_audio_chunk(pcm_data, effective_sample_rate)
+                        result = self.process_audio_chunk(pcm_data, effective_sample_rate, chunk_id)
                         return {
                             "status": "success",
                             "chunk_result": result,
                             "sample_rate": 16000,
-                            "chunk_file": webm_file_path
+                            "chunk_file": webm_file_path,
+                            "chunk_id": chunk_id
                         }
                     else:
                         # WebM conversion failed
-                        self.logger.error("Failed to convert WebM chunk to PCM")
-                        return {"status": "error", "message": "Audio conversion failed"}
+                        self.logger.error(f"Failed to convert WebM chunk to PCM (chunk_id={chunk_id})")
+                        return {"status": "error", "message": "Audio conversion failed", "chunk_id": chunk_id}
                 else:
                     # Handle non-WebM files (WAV, etc.) directly
-                    result = self.process_audio_chunk(audio_bytes, effective_sample_rate)
+                    result = self.process_audio_chunk(audio_bytes, effective_sample_rate, chunk_id)
                     return {
                         "status": "success",
                         "chunk_result": result,
-                        "sample_rate": effective_sample_rate
+                        "sample_rate": effective_sample_rate,
+                        "chunk_id": chunk_id
                     }
                 
             except Exception as e:
-                self.logger.error(f"Error processing audio chunk: {e}")
+                self.logger.error(f"Error processing audio chunk (chunk_id={chunk_id}): {e}")
                 raise HTTPException(status_code=500, detail=str(e))
 
-    def _handle_detection(self, match, score, top_results):
+    def _handle_detection(self, match, score, top_results, chunk_id: Optional[str] = None):
         """Apply the accumulate → commit → lock policy to one identification result.
 
         - confidence_threshold_low  (0.45): a candidate is worth showing as TENTATIVE
@@ -830,14 +837,14 @@ class Speakerid(Baseplugin):
 
         # Nothing usable above the low bar → tentative "unknown", no name injected.
         if not match or score < self.confidence_threshold_low:
-            self._send_tentative(None, score)
+            self._send_tentative(None, score, chunk_id)
             return
 
         runner_up_score = top_results[1][1] if len(top_results) > 1 else 0.0
 
         # Fast path: one strong, clearly-best detection commits immediately.
         if score >= self.confidence_threshold_high and (score - runner_up_score) >= self.COMMIT_MARGIN:
-            self._commit(match, score)
+            self._commit(match, score, chunk_id)
             return
 
         # Slow path: accumulate evidence, look for a stable majority above the bar.
@@ -851,14 +858,14 @@ class Speakerid(Baseplugin):
             if count >= self.COMMIT_VOTES:
                 mean_score = sum(scores_by_name[name]) / len(scores_by_name[name])
                 if mean_score >= self.confidence_threshold_high:
-                    self._commit(name, mean_score)
+                    self._commit(name, mean_score, chunk_id)
                     return
 
         # No commit yet — show the most-seen candidate as tentative (no LLM injection).
         best_name = max(votes, key=lambda k: votes[k])
-        self._send_tentative(best_name, score)
+        self._send_tentative(best_name, score, chunk_id)
 
-    def _commit(self, name, score):
+    def _commit(self, name, score, chunk_id: Optional[str] = None):
         """Inject the speaker into the LLM context + topbar. The LOCK (which freezes
         detection for the rest of the conversation) only applies when a conversation is
         active — during the inter-conversation gap the same injection is a continuous
@@ -874,7 +881,7 @@ class Speakerid(Baseplugin):
         self.last_phrase_speaker.confidence = score
         self.is_processing = False
         self.logger.info(
-            f"Speaker {status.upper()}: {name} (score {score:.2f})"
+            f"Speaker {status.upper()}: {name} (score {score:.2f}, chunk_id={chunk_id})"
             + (" — detection locked for this conversation" if self.conversation_active
                else " — pre-warm (unlocked)")
         )
@@ -882,7 +889,7 @@ class Speakerid(Baseplugin):
         # the speaker to the frontend in one message (status = confirmed|prewarmed).
         self._update_speaker_context(name, score, status, method="auto")
 
-    def _send_tentative(self, name, score):
+    def _send_tentative(self, name, score, chunk_id: Optional[str] = None):
         """Show a tentative (unconfirmed) candidate in the topbar WITHOUT injecting a
         name into the LLM context. name=None ⇒ unknown/listening."""
         self.last_speaker.id = name
@@ -893,7 +900,8 @@ class Speakerid(Baseplugin):
                 "name": name or "unknown",
                 "confidence": score,
                 "status": "partial" if name else "unknown",
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "chunk_id": chunk_id
             }
         })
                 
