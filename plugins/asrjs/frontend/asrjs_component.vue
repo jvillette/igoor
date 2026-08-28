@@ -260,7 +260,7 @@ export default {
                 this.processor.port.onmessage = (event) => {
                     if (event.data.type === 'speakerid-chunk') {
                         // Send chunk to speakerid
-                        this.$_sendFixedChunkToSpeakerID(event.data.data);
+                        this.$_sendFixedChunkToSpeakerID(event.data.data, event.data.chunk_id);
                     } else if (event.data.type === 'audio-data') {
                         // Store audio data for final WAV file
                         this.recordingBuffer = this.recordingBuffer.concat(event.data.data);
@@ -356,7 +356,7 @@ export default {
                 this.processor.port.onmessage = (event) => {
                     if (event.data.type === 'speakerid-chunk') {
                         // Send chunk to speakerid
-                        this.$_sendFixedChunkToSpeakerID(event.data.data);
+                        this.$_sendFixedChunkToSpeakerID(event.data.data, event.data.chunk_id);
                     } else if (event.data.type === 'audio-data') {
                         // Store audio data for final WAV file
                         this.recordingBuffer = this.recordingBuffer.concat(event.data.data);
@@ -698,7 +698,7 @@ export default {
             return int16Array;
         },
 
-        async $_sendFixedChunkToSpeakerID(float32Chunk) {
+        async $_sendFixedChunkToSpeakerID(float32Chunk, chunk_id = null) {
             // Send fixed chunk to speakerid for identification
             if (!this.speakerIdAvailable || !this.voiceProfilesEnabled) {
                 console.log('SpeakerID not available or voice profiles disabled, skipping chunk');
@@ -721,6 +721,9 @@ export default {
                 const formData = new FormData();
                 formData.append('audio_file', wavBlob, 'chunk.wav');
                 formData.append('sample_rate', '16000');
+                if (chunk_id !== null && chunk_id !== undefined) {
+                    formData.append('chunk_id', chunk_id.toString());
+                }
 
                 const response = await fetch('http://127.0.0.1:9714/api/plugins/speakerid/process_audio_chunk', {
                     method: 'POST',
